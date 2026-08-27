@@ -1,9 +1,15 @@
+import logging
 import os
-import subprocess
-import time
-from PIL import Image
+import pathlib
 import shutil
+import subprocess
 import sys
+import time
+
+from PIL import Image
+
+# 変換の経過は標準出力ではなくログに出す（公開環境で画面やログを汚さないため）
+logger = logging.getLogger(__name__)
 
 
 def check_libreoffice_installation():
@@ -21,7 +27,7 @@ def get_libreoffice_command():
     """
     環境に応じたLibreOfficeコマンドを取得
     """
-    print("=== LibreOffice検索開始 ===")
+    logger.debug("=== LibreOffice検索開始 ===")
 
     # Windows用の標準インストールパスを優先（初回起動を考慮してタイムアウトを延長）
     windows_paths = [
@@ -32,7 +38,7 @@ def get_libreoffice_command():
     for path in windows_paths:
         if os.path.exists(path):
             try:
-                print(f"テスト中（Windows標準パス）: {path}")
+                logger.debug(f"テスト中（Windows標準パス）: {path}")
 
                 # Windowsでコンソールウィンドウを非表示にする
                 startupinfo = None
@@ -50,15 +56,15 @@ def get_libreoffice_command():
                     creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
                 )
                 if result.returncode == 0:
-                    print(f"LibreOfficeが見つかりました: {path}")
+                    logger.debug(f"LibreOfficeが見つかりました: {path}")
                     return path
             except subprocess.TimeoutExpired:
-                print(f"{path} タイムアウト（LibreOfficeの初回起動が遅い可能性）")
+                logger.debug(f"{path} タイムアウト（LibreOfficeの初回起動が遅い可能性）")
                 # タイムアウトしても、実際の変換では動作する可能性があるので、このパスを返す
-                print(f"タイムアウトしましたが、このパスを使用します: {path}")
+                logger.debug(f"タイムアウトしましたが、このパスを使用します: {path}")
                 return path
             except FileNotFoundError:
-                print(f"ファイルが見つかりません: {path}")
+                logger.debug(f"ファイルが見つかりません: {path}")
                 continue
 
     # PATHからコマンドを試す
@@ -66,7 +72,7 @@ def get_libreoffice_command():
 
     for cmd in path_commands:
         try:
-            print(f"テスト中（PATH）: {cmd}")
+            logger.debug(f"テスト中（PATH）: {cmd}")
 
             # Windowsでコンソールウィンドウを非表示にする
             startupinfo = None
@@ -84,98 +90,16 @@ def get_libreoffice_command():
                 creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
             )
             if result.returncode == 0:
-                print(f"LibreOfficeが見つかりました: {cmd}")
+                logger.debug(f"LibreOfficeが見つかりました: {cmd}")
                 return cmd
         except (subprocess.TimeoutExpired, FileNotFoundError) as e:
-            print(f"{cmd} で失敗: {type(e).__name__}")
+            logger.debug(f"{cmd} で失敗: {type(e).__name__}")
             continue
 
-    print("=== LibreOffice検索終了（見つからず） ===")
+    logger.debug("=== LibreOffice検索終了（見つからず） ===")
     raise Exception("LibreOfficeが見つかりません。LibreOfficeをインストールしてください。")
 
 
-def convert_excel_with_fit_to_page(input_path, output_dir):
-    """
-    Excelファイルを1ページに収めてPDF変換（タイムアウト延長版）
-    """
-    libreoffice_cmd = get_libreoffice_command()
-    file_name = os.path.splitext(os.path.basename(input_path))[0]
-    output_path = os.path.join(output_dir, f"{file_name}.pdf")
-
-    try:
-        print(f"Excelファイルを1ページに収めて変換中: {os.path.basename(input_path)}")
-
-        # 方法1: 直接calc_pdf_Exportでオプション指定を試行
-        convert_cmd = [
-            libreoffice_cmd,
-            '--headless',
-            '--convert-to', 'pdf:calc_pdf_Export:{"ScaleToPagesX":{"type":"long","value":"1"},"ScaleToPagesY":{"type":"long","value":"1"}}',
-            '--outdir', output_dir,
-            input_path
-        ]
-
-        print(f"方法1: オプション指定でPDF変換中...")
-
-        # Windowsでコンソールウィンドウを非表示にする
-        startupinfo = None
-        if sys.platform == 'win32':
-            startupinfo = subprocess.STARTUPINFO()
-            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-            startupinfo.wShowWindow = subprocess.SW_HIDE
-
-        result = subprocess.run(
-            convert_cmd,
-            capture_output=True,
-            text=True,
-            timeout=120,  # 2分に延長
-            startupinfo=startupinfo,
-            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
-        )
-
-        if result.returncode == 0 and os.path.exists(output_path):
-            print(f"方法1で変換成功: {os.path.basename(output_path)}")
-            return output_path
-
-        print(f"方法1失敗、方法2を試行...")
-
-        # 方法2: 従来の単純変換（フォールバック）
-        convert_cmd_simple = [
-            libreoffice_cmd,
-            '--headless',
-            '--convert-to', 'pdf:calc_pdf_Export',
-            '--outdir', output_dir,
-            input_path
-        ]
-
-        print(f"方法2: 単純変換でPDF変換中...")
-
-        # Windowsでコンソールウィンドウを非表示にする
-        startupinfo = None
-        if sys.platform == 'win32':
-            startupinfo = subprocess.STARTUPINFO()
-            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-            startupinfo.wShowWindow = subprocess.SW_HIDE
-
-        result = subprocess.run(
-            convert_cmd_simple,
-            capture_output=True,
-            text=True,
-            timeout=120,  # 2分に延長
-            startupinfo=startupinfo,
-            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
-        )
-
-        if result.returncode != 0:
-            error_msg = result.stderr if result.stderr else result.stdout
-            raise Exception(f"PDF変換エラー: {error_msg}")
-
-        print(f"方法2で変換完了: {os.path.basename(output_path)}")
-        return output_path
-
-    except subprocess.TimeoutExpired:
-        raise Exception(f"LibreOfficeでの変換がタイムアウトしました（2分経過）: {input_path}")
-    except Exception as e:
-        raise Exception(f"Excel変換エラー: {e}")
 
 
 def convert_to_pdf(input_path, output_dir):
@@ -200,16 +124,21 @@ def convert_to_pdf(input_path, output_dir):
             # Office文書の場合はLibreOfficeを使用
             libreoffice_cmd = get_libreoffice_command()
 
-            # LibreOfficeコマンドを実行
+            # LibreOffice はユーザープロファイルを1つしか同時に開けない。
+            # 共有サーバー上で複数の変換が重なるとプロファイルのロックで失敗するため、
+            # 変換ごとに専用のプロファイルディレクトリを割り当てる。
+            profile_dir = os.path.join(output_dir, "_lo_profile")
+            profile_url = pathlib.Path(profile_dir).as_uri()
+
             cmd = [
                 libreoffice_cmd,
                 '--headless',
+                '--norestore',
+                '-env:UserInstallation=%s' % profile_url,
                 '--convert-to', 'pdf',
                 '--outdir', output_dir,
                 input_path
             ]
-
-            print(f"実行中: {' '.join(cmd)}")
 
             # Windowsでコンソールウィンドウを非表示にする
             startupinfo = None

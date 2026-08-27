@@ -9,6 +9,14 @@ Streamlitで作成されたWebアプリケーションです。様々なファ�
 - **ページ番号追加**: PDFにページ番号（1/10形式）を追加
 - **順序変更**: アップロードしたファイルの順序を自由に変更
 
+## 扱えないファイル
+
+次のファイルは処理できない。アップロードした時点で日本語のメッセージを出す。
+
+- パスワードで保護されたPDF（保護を解除してからアップロードする）
+- 壊れているPDF・PDF以外の中身を持つファイル
+- 中身が空のファイル
+
 ## 対応ファイル形式
 
 | カテゴリ | 形式 |
@@ -28,10 +36,6 @@ Streamlitで作成されたWebアプリケーションです。様々なファ�
 4. 「変換を開始」ボタンをクリック
 5. 完了後、ダウンロードボタンからPDFを取得
 
-## デモ
-
-Streamlit Cloudで公開中: [アプリURL]
-
 ## ローカル環境での実行
 
 ### 必要条件
@@ -43,8 +47,8 @@ Streamlit Cloudで公開中: [アプリURL]
 
 ```bash
 # リポジトリをクローン
-git clone https://github.com/[username]/[repository].git
-cd [repository]
+git clone https://github.com/pitawo/pdf-toolkit.git
+cd pdf-toolkit
 
 # 依存パッケージをインストール
 pip install -r requirements.txt

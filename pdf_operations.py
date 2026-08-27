@@ -126,6 +126,11 @@ def extract_pages(pdf_path, page_numbers, output_path):
         if 1 <= page_num <= total_pages:
             writer.add_page(reader.pages[page_num - 1])
 
+    # 1ページも該当しないと中身が空のPDFができてしまうので、ここで止める
+    if len(writer.pages) == 0:
+        raise ValueError(
+            "指定されたページはこのPDFに存在しません（全%dページ）" % total_pages)
+
     with open(output_path, 'wb') as f:
         writer.write(f)
 

@@ -12,7 +12,24 @@ from pdf_operations import (
     rotate_pages,
     add_watermark
 )
-from PyPDF2 import PdfReader
+from app_utils import (
+    MAX_TOTAL_UPLOAD_MB,
+    describe_error,
+    read_pdf,
+    safe_filename,
+    save_upload,
+    total_size_mb
+)
+
+
+OFFICE_EXTENSIONS = ('.xlsx', '.xls', '.docx', '.doc', '.pptx', '.ppt', '.odt', '.ods', '.odp')
+
+
+@st.cache_resource
+def libreoffice_available():
+    """LibreOffice が使える環境かを一度だけ調べる（検出に数秒かかるためキャッシュする）。"""
+    from file_converter_libreoffice import check_libreoffice_installation
+    return check_libreoffice_installation()
 
 
 def main():
@@ -111,6 +128,24 @@ def render_convert_combine_tab():
         st.info("📥 ファイルをアップロードしてください。")
         return
 
+    # 変換結果はすべてメモリ上に保持するので、合計サイズが大きいときは先に知らせる
+    uploaded_mb = total_size_mb(st.session_state.uploaded_files)
+    if uploaded_mb > MAX_TOTAL_UPLOAD_MB:
+        st.warning(
+            "アップロードの合計が %.0fMB あります。%dMB を超えると処理に失敗することがあります。"
+            "ファイルを分けてお試しください。" % (uploaded_mb, MAX_TOTAL_UPLOAD_MB)
+        )
+
+    # Office 文書の変換には LibreOffice が要る。実行してから失敗するより先に伝える
+    has_office = any(
+        f.name.lower().endswith(OFFICE_EXTENSIONS) for f in st.session_state.uploaded_files
+    )
+    if has_office and not libreoffice_available():
+        st.warning(
+            "この環境では Office 文書の変換に必要な LibreOffice が見つかりませんでした。"
+            "PDF と画像はそのまま処理できます。"
+        )
+
     # 処理対象リスト
     if st.session_state.uploaded_files:
         st.subheader("📑 処理対象ファイル（順番変更・削除可能）")
@@ -147,25 +182,25 @@ def render_convert_combine_tab():
                     st.session_state.converted_files = []
                     st.session_state.combined_pdf = None
 
-                    # リスト to store converted PDF paths
+                    # 変換後の PDF のパスを順番どおりに保持する
                     converted_pdf_paths = []
+                    used_names = set()
 
                     for uploaded_file in st.session_state.uploaded_files:
-                        temp_path = os.path.join(temp_dir, uploaded_file.name)
-                        with open(temp_path, "wb") as f:
-                            f.write(uploaded_file.getvalue())
+                        # ファイル名はブラウザから来る値なので、そのままパスに使わない。
+                        # 同名が複数あると上書きされてしまうため連番も付ける。
+                        temp_path = save_upload(uploaded_file, temp_dir, used_names)
 
-                        temp_path = os.path.abspath(temp_path)
                         if not os.path.exists(temp_path):
-                            raise FileNotFoundError(f"一時ファイルが存在しません: {temp_path}")
+                            raise FileNotFoundError("一時ファイルを作成できませんでした")
 
-                        pdf_path = convert_to_pdf(temp_path, temp_dir) if not uploaded_file.name.lower().endswith('.pdf') else temp_path
+                        pdf_path = convert_to_pdf(temp_path, temp_dir) if not temp_path.lower().endswith('.pdf') else temp_path
 
                         if add_page_numbers_option and not combine_option:
                             pdf_path = add_page_numbers(pdf_path)
 
                         if not os.path.exists(pdf_path):
-                            raise FileNotFoundError(f"PDFファイルが存在しません: {pdf_path}")
+                            raise FileNotFoundError("変換後のPDFを作成できませんでした")
 
                         # Append to the list of PDF paths
                         converted_pdf_paths.append(pdf_path)
@@ -179,8 +214,9 @@ def render_convert_combine_tab():
                         })
 
                     if combine_option:
-                        # 結合処理
-                        combined_pdf_temp = os.path.join(temp_dir, f"{combined_filename}.pdf")
+                        # 結合処理（ファイル名は利用者の入力なので安全な形に直す）
+                        safe_stem = safe_filename(combined_filename, default="combined_document")
+                        combined_pdf_temp = os.path.join(temp_dir, f"{safe_stem}.pdf")
                         combine_pdfs(converted_pdf_paths, combined_pdf_temp)
 
                         if add_page_numbers_option:
@@ -190,13 +226,13 @@ def render_convert_combine_tab():
                         with open(combined_pdf_temp, "rb") as combined_pdf_file:
                             combined_pdf_bytes = combined_pdf_file.read()
                         st.session_state.combined_pdf = {
-                            "name": f"{combined_filename}_final.pdf",
+                            "name": f"{safe_stem}_final.pdf",
                             "data": combined_pdf_bytes
                         }
 
             except Exception as e:
-                st.error(f"❌ エラーが発生しました: {str(e)}")
-                st.stop()
+                # 他のタブの描画まで止めたくないので st.stop() は使わない
+                st.error("❌ " + describe_error(e))
 
     st.markdown("---")
     st.subheader("📥 ダウンロード")
@@ -239,21 +275,24 @@ def render_split_tab():
         key="split_uploader"
     )
 
+    # 開けるかどうかはアップロードした時点で確かめる（開けないファイルで画面を落とさない）
+    pdf_bytes, reader, error = None, None, None
     if uploaded_file:
-        # PDFの情報を表示
         pdf_bytes = uploaded_file.getvalue()
-        reader = PdfReader(io.BytesIO(pdf_bytes))
+        reader, error = read_pdf(pdf_bytes)
+        if error:
+            st.error("❌ " + error)
+
+    if uploaded_file and not error:
         total_pages = len(reader.pages)
-        st.info(f"📄 {uploaded_file.name} - 全{total_pages}ページ")
+        st.info(f"📄 {safe_filename(uploaded_file.name)} - 全{total_pages}ページ")
 
         if st.button("✂️ 分割実行", type="primary", key="split_execute"):
             with st.spinner("⏳ 分割中..."):
                 try:
                     with tempfile.TemporaryDirectory() as temp_dir:
-                        # アップロードされたファイルを一時保存
-                        temp_path = os.path.join(temp_dir, uploaded_file.name)
-                        with open(temp_path, "wb") as f:
-                            f.write(pdf_bytes)
+                        # ファイル名はブラウザから来る値なので、そのままパスに使わない
+                        temp_path = save_upload(uploaded_file, temp_dir, data=pdf_bytes)
 
                         # PDF分割
                         output_paths = split_pdf(temp_path, temp_dir)
@@ -267,14 +306,14 @@ def render_split_tab():
                         zip_buffer.seek(0)
                         st.session_state.split_result = {
                             "zip_data": zip_buffer.getvalue(),
-                            "filename": f"{os.path.splitext(uploaded_file.name)[0]}_split.zip",
+                            "filename": f"{os.path.splitext(safe_filename(uploaded_file.name))[0]}_split.zip",
                             "page_count": len(output_paths)
                         }
 
                     st.success(f"✅ {len(output_paths)}ページに分割しました")
 
                 except Exception as e:
-                    st.error(f"❌ エラーが発生しました: {str(e)}")
+                    st.error("❌ " + describe_error(e))
 
     # ダウンロードボタン
     if st.session_state.split_result:
@@ -302,12 +341,17 @@ def render_extract_tab():
         key="extract_uploader"
     )
 
+    # 開けるかどうかはアップロードした時点で確かめる（開けないファイルで画面を落とさない）
+    pdf_bytes, reader, error = None, None, None
     if uploaded_file:
-        # PDFの情報を表示
         pdf_bytes = uploaded_file.getvalue()
-        reader = PdfReader(io.BytesIO(pdf_bytes))
+        reader, error = read_pdf(pdf_bytes)
+        if error:
+            st.error("❌ " + error)
+
+    if uploaded_file and not error:
         total_pages = len(reader.pages)
-        st.info(f"📄 {uploaded_file.name} - 全{total_pages}ページ")
+        st.info(f"📄 {safe_filename(uploaded_file.name)} - 全{total_pages}ページ")
 
         page_input = st.text_input(
             "抽出するページ番号を入力",
@@ -333,13 +377,11 @@ def render_extract_tab():
                     with st.spinner("⏳ 抽出中..."):
                         try:
                             with tempfile.TemporaryDirectory() as temp_dir:
-                                # アップロードされたファイルを一時保存
-                                temp_path = os.path.join(temp_dir, uploaded_file.name)
-                                with open(temp_path, "wb") as f:
-                                    f.write(pdf_bytes)
+                                # ファイル名はブラウザから来る値なので、そのままパスに使わない
+                                temp_path = save_upload(uploaded_file, temp_dir, data=pdf_bytes)
 
                                 # ページ抽出
-                                output_path = os.path.join(temp_dir, f"{os.path.splitext(uploaded_file.name)[0]}_extracted.pdf")
+                                output_path = os.path.join(temp_dir, f"{os.path.splitext(safe_filename(uploaded_file.name))[0]}_extracted.pdf")
                                 extract_pages(temp_path, pages_to_extract, output_path)
 
                                 # 結果を保存
@@ -353,7 +395,7 @@ def render_extract_tab():
                             st.success(f"✅ {len(pages_to_extract)}ページを抽出しました")
 
                         except Exception as e:
-                            st.error(f"❌ エラーが発生しました: {str(e)}")
+                            st.error("❌ " + describe_error(e))
 
     # ダウンロードボタン
     if st.session_state.extract_result:
@@ -381,12 +423,17 @@ def render_rotate_tab():
         key="rotate_uploader"
     )
 
+    # 開けるかどうかはアップロードした時点で確かめる（開けないファイルで画面を落とさない）
+    pdf_bytes, reader, error = None, None, None
     if uploaded_file:
-        # PDFの情報を表示
         pdf_bytes = uploaded_file.getvalue()
-        reader = PdfReader(io.BytesIO(pdf_bytes))
+        reader, error = read_pdf(pdf_bytes)
+        if error:
+            st.error("❌ " + error)
+
+    if uploaded_file and not error:
         total_pages = len(reader.pages)
-        st.info(f"📄 {uploaded_file.name} - 全{total_pages}ページ")
+        st.info(f"📄 {safe_filename(uploaded_file.name)} - 全{total_pages}ページ")
 
         col1, col2 = st.columns(2)
 
@@ -426,13 +473,11 @@ def render_rotate_tab():
                 with st.spinner("⏳ 回転中..."):
                     try:
                         with tempfile.TemporaryDirectory() as temp_dir:
-                            # アップロードされたファイルを一時保存
-                            temp_path = os.path.join(temp_dir, uploaded_file.name)
-                            with open(temp_path, "wb") as f:
-                                f.write(pdf_bytes)
+                            # ファイル名はブラウザから来る値なので、そのままパスに使わない
+                            temp_path = save_upload(uploaded_file, temp_dir, data=pdf_bytes)
 
                             # ページ回転
-                            output_path = os.path.join(temp_dir, f"{os.path.splitext(uploaded_file.name)[0]}_rotated.pdf")
+                            output_path = os.path.join(temp_dir, f"{os.path.splitext(safe_filename(uploaded_file.name))[0]}_rotated.pdf")
                             rotate_pages(temp_path, rotation, page_numbers, output_path)
 
                             # 結果を保存
@@ -446,7 +491,7 @@ def render_rotate_tab():
                         st.success(f"✅ {target_desc}を{rotation}度回転しました")
 
                     except Exception as e:
-                        st.error(f"❌ エラーが発生しました: {str(e)}")
+                        st.error("❌ " + describe_error(e))
 
     # ダウンロードボタン
     if st.session_state.rotate_result:
@@ -474,12 +519,17 @@ def render_watermark_tab():
         key="watermark_uploader"
     )
 
+    # 開けるかどうかはアップロードした時点で確かめる（開けないファイルで画面を落とさない）
+    pdf_bytes, reader, error = None, None, None
     if uploaded_file:
-        # PDFの情報を表示
         pdf_bytes = uploaded_file.getvalue()
-        reader = PdfReader(io.BytesIO(pdf_bytes))
+        reader, error = read_pdf(pdf_bytes)
+        if error:
+            st.error("❌ " + error)
+
+    if uploaded_file and not error:
         total_pages = len(reader.pages)
-        st.info(f"📄 {uploaded_file.name} - 全{total_pages}ページ")
+        st.info(f"📄 {safe_filename(uploaded_file.name)} - 全{total_pages}ページ")
 
         watermark_text = st.text_input(
             "透かしテキスト",
@@ -505,13 +555,11 @@ def render_watermark_tab():
                 with st.spinner("⏳ 透かしを追加中..."):
                     try:
                         with tempfile.TemporaryDirectory() as temp_dir:
-                            # アップロードされたファイルを一時保存
-                            temp_path = os.path.join(temp_dir, uploaded_file.name)
-                            with open(temp_path, "wb") as f:
-                                f.write(pdf_bytes)
+                            # ファイル名はブラウザから来る値なので、そのままパスに使わない
+                            temp_path = save_upload(uploaded_file, temp_dir, data=pdf_bytes)
 
                             # 透かし追加
-                            output_path = os.path.join(temp_dir, f"{os.path.splitext(uploaded_file.name)[0]}_watermarked.pdf")
+                            output_path = os.path.join(temp_dir, f"{os.path.splitext(safe_filename(uploaded_file.name))[0]}_watermarked.pdf")
                             add_watermark(temp_path, watermark_text, output_path, font_size, opacity, angle)
 
                             # 結果を保存
@@ -524,7 +572,7 @@ def render_watermark_tab():
                         st.success(f"✅ 透かし「{watermark_text}」を追加しました")
 
                     except Exception as e:
-                        st.error(f"❌ エラーが発生しました: {str(e)}")
+                        st.error("❌ " + describe_error(e))
 
     # ダウンロードボタン
     if st.session_state.watermark_result:
